@@ -1,0 +1,1457 @@
+import com.kms.katalon.core.logging.KeywordLogger
+import groovy.xml.XmlParser
+import java.nio.file.*
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Set
+import java.util.HashSet
+import com.kms.katalon.core.configuration.RunConfiguration
+import java.text.ParseException
+
+public class ParallelJUnitReportToHTML {
+	static void generateHTMLFromLatestJUnit() {
+		KeywordLogger logger = KeywordLogger.getInstance(ParallelJUnitReportToHTML.class)
+
+		// Debug: Verify logger initialization
+		if (logger == null) {
+			println "❌ ERROR: KeywordLogger failed to initialize!"
+			return
+		}
+		logger.logInfo("✅ KeywordLogger initialized successfully")
+
+		// Step 0: Base path (shared location before the build-* folder)
+		String basePath = "D:/bamboo/agent-home/artifact/AGK-AKNP/shared"
+		File sharedDir = new File(basePath)
+
+		// Step 1: Find latest build-xxx folder
+		File buildDir = sharedDir.listFiles()?.findAll { it.isDirectory() && it.name.startsWith("build-") }?.sort { -it.lastModified() }?.first()
+		if (!buildDir) {
+			logger.logWarning("❌ No build-* directory found in: ${basePath}")
+			return
+		}
+
+		// Step 2: Resolve Reports path
+		String reportsPath = Paths.get(buildDir.absolutePath, "Katalon-Report", "Reports").toString()
+		File reportsDir = new File(reportsPath)
+		if (!reportsDir.exists() || !reportsDir.isDirectory()) {
+			logger.logWarning("❌ Reports folder not found at: ${reportsPath}")
+			return
+		}
+
+		logger.logInfo("✅ Resolved Reports path: ${reportsPath}")
+
+		// Step 3: Find the latest timestamped folder
+		File latestTimestampFolder = reportsDir.listFiles()?.findAll { it.isDirectory() }?.sort { -it.lastModified() }?.first()
+		if (!latestTimestampFolder) {
+			logger.logWarning("❌ No timestamped folder found in Reports directory: ${reportsPath}")
+			return
+		}
+		logger.logInfo("Latest timestamp folder: ${latestTimestampFolder.absolutePath}")
+
+		// Step 4: Find the single subfolder with any name
+		File[] subFolders = latestTimestampFolder.listFiles()?.findAll { it.isDirectory() }
+		if (!subFolders || subFolders.length != 1) {
+			logger.logWarning("❌ Expected exactly one subfolder in timestamp folder: ${latestTimestampFolder.absolutePath}, found ${subFolders?.length ?: 0}")
+			return
+		}
+		File executionFolder = subFolders[0]
+		logger.logInfo("Found single subfolder: ${executionFolder.absolutePath}")
+
+		String executionSource = RunConfiguration.getExecutionSource()
+		println "Execution Source: ${executionSource}"
+
+		// Step 5: Determine execution type based on subfolder count and names
+		File[] executionSubFolders = executionFolder.listFiles()?.findAll { it.isDirectory() }
+		if (!executionSubFolders) {
+			logger.logWarning("❌ No subfolders found in execution folder: ${executionFolder.absolutePath}")
+			return
+		}
+
+		File targetFolder = null
+		String executionType = ""
+		File junitFile = null
+		File outputFolder = null
+		boolean isSingleSuite = false
+
+		if (executionSubFolders.length == 1) {
+			executionType = "Agent Portal Automation Test"
+			targetFolder = executionSubFolders[0]
+			isSingleSuite = true
+		} else if (executionSubFolders.length >= 3) {
+			executionType = "Agent Portal Automation Test"
+			targetFolder = executionSubFolders.find { !it.name.contains("Suite") }
+			isSingleSuite = false
+			if (!targetFolder) {
+				logger.logWarning("❌ No subfolder without 'testsuite' in name found in: ${executionFolder.absolutePath}")
+				return
+			}
+		} else {
+			logger.logWarning("❌ Unexpected number of subfolders (${executionSubFolders.length}) in: ${executionFolder.absolutePath}")
+			return
+		}
+
+		logger.logInfo("Execution type: ${executionType}, Target folder: ${targetFolder.absolutePath}")
+
+		// Step 6: Navigate to the timestamped subfolder within the target folder
+		File timestampSubFolder = targetFolder.listFiles()?.findAll { it.isDirectory() }?.sort { -it.lastModified() }?.first()
+		if (!timestampSubFolder) {
+			logger.logWarning("❌ No timestamped subfolder found in target folder: ${targetFolder.absolutePath}")
+			return
+		}
+
+		junitFile = new File(timestampSubFolder, "JUnit_Report.xml")
+		outputFolder = timestampSubFolder
+
+		if (!junitFile.exists()) {
+			logger.logWarning("❌ JUnit_Report.xml not found at: ${junitFile.absolutePath}")
+			return
+		}
+
+		logger.logInfo("Processing ${executionType} execution JUnit report at: ${junitFile.absolutePath}")
+
+		// Step 7: Parse JUnit XML and generate HTML
+		def parser = new XmlParser()
+		def testSuite = parser.parse(junitFile)
+
+		// Extract environment properties
+		def properties = testSuite.'testsuite'[0].properties?.property
+		def envProperties = [
+			"hostName": "N/A",
+			"os": "N/A",
+			"katalonVersion": "N/A",
+			"browser": "N/A"
+		]
+		properties?.each { prop ->
+			def name = prop.'@name'
+			def value = prop.'@value' ?: "N/A"
+			if (name in envProperties.keySet()) {
+				envProperties[name] = value
+			}
+		}
+		logger.logInfo("Environment properties: ${envProperties}")
+
+		// Extract testsuites name
+		String testsuitesName = testSuite.'@name' ?: "N/A"
+		logger.logInfo("Extracted testsuites name: ${testsuitesName}")
+
+		// Extract start time from testsuite @timestamp attributes
+		List<Date> timestampDates = []
+		def timestampFormats = [
+			new SimpleDateFormat("dd-MM-yyyy'T'HH:mm:ss"),
+			new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss"),
+			new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS"),
+			new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX"),
+			new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX")
+		]
+		timestampFormats.each { it.setTimeZone(TimeZone.getTimeZone("Asia/Kolkata")) }
+
+		testSuite.'testsuite'.each { suite ->
+			String timestamp = suite.'@timestamp'?.'trim'() ?: ""
+			if (timestamp) {
+				boolean parsed = false
+				for (SimpleDateFormat sdf : timestampFormats) {
+					try {
+						Date parsedDate = sdf.parse(timestamp)
+						timestampDates << parsedDate
+						logger.logInfo("Parsed testsuite timestamp: ${timestamp} -> ${parsedDate} (format: ${sdf.toPattern()})")
+						parsed = true
+						break
+					} catch (ParseException e) {
+						// Try next format
+					}
+				}
+				if (!parsed) {
+					logger.logWarning("Failed to parse timestamp: ${timestamp}, no matching format")
+				}
+			} else {
+				logger.logWarning("No @timestamp found for testsuite: ${suite.'@name' ?: 'Unknown'}")
+			}
+		}
+
+		String startTimeExecution = "Not found"
+		if (timestampDates) {
+			Date minDate = timestampDates.min()
+			SimpleDateFormat outputFormat = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss")
+			outputFormat.setTimeZone(TimeZone.getTimeZone("Asia/Kolkata"))
+			startTimeExecution = outputFormat.format(minDate)
+			logger.logInfo("Earliest timestamp selected: ${minDate} -> Formatted: ${startTimeExecution}")
+		} else {
+			logger.logWarning("No valid timestamps found in testsuite @timestamp attributes")
+		}
+		logger.logInfo("Start Time Execution: ${startTimeExecution}")
+
+		// Extract end time from system-out timestamps
+		List<String> allSystemOutTimestamps = []
+		testSuite.'testsuite'.each { suite ->
+			suite.'testcase'.each { tc ->
+				if (tc.'system-out' && tc.'system-out'?.'text'()?.'trim'()) {
+					String systemOut = tc.'system-out'.'text'().'trim'().'replaceAll'('\r\n', '\n')
+					def timestampMatcher = (systemOut =~ /\d{2}-\d{2}-\d{4}T\d{2}:\d{2}:\d{2}/)
+					timestampMatcher.each { match ->
+						allSystemOutTimestamps << match
+					}
+				}
+			}
+		}
+		String endTimeExecution = allSystemOutTimestamps ? allSystemOutTimestamps.max() : "Not found"
+		endTimeExecution = endTimeExecution.replace('T', ' ')
+		logger.logInfo("End Time Execution: ${endTimeExecution}")
+
+		int totalTests = 0, totalPassed = 0, totalFailures = 0, totalErrors = 0, totalSkipped = 0, totalIncomplete = 0
+		int totalNewRequirement = 0, totalDataSynchronization = 0, totalDefect = 0
+		double totalTimeInSeconds = 0.0
+		def testCasesHtml = new StringBuilder()
+		def embeddedDetailsScript = new StringBuilder()
+		def html = new StringBuilder()
+		Set<String> suiteNames = new HashSet<>()
+
+		// Calculate totalTimeInSeconds from the single testsuites @time attribute
+		totalTimeInSeconds = getValidTime(testSuite.'@time')
+		logger.logInfo("Testsuites time: ${totalTimeInSeconds} seconds")
+
+		html << """
+    <html lang='en'>
+    <head>
+        <meta charset='UTF-8'>
+        <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+        <title>${executionType} Execution Report</title>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+        <script>
+            window.onload = function() {
+                document.body.style.zoom = "80%";
+            };
+        </script>
+        <style>
+            body {
+                font-family: 'Inter', sans-serif;
+                background-color: #f4f6f8;
+                color: #333;
+                margin: 0;
+                padding: 0;
+            }
+            h2, h3 {
+                text-align: center;
+                margin: 20px 0;
+                color: #2c3e50;
+            }
+            .container {
+                width: 90%;
+                max-width: 1200px;
+                margin: auto;
+                padding: 20px;
+                border: 1px solid #d1d5db;
+                border-radius: 8px;
+                background: white;
+                box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+            }
+            .summary-table, .testcase-table, .env-table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+                background: white;
+                box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+                border-radius: 8px;
+                overflow: hidden;
+            }
+            .summary-table th, .summary-table td,
+            .testcase-table th, .testcase-table td,
+            .env-table th, .env-table td {
+                padding: 12px;
+                text-align: left;
+                border-bottom: 1px solid #eee;
+            }
+            .summary-table th,
+            .env-table th {
+                background-color: #3498db;
+                color: white;
+                font-weight: 600;
+            }
+            .testcase-table th {
+                background-color: #ecf5fc;
+                color: #3498db;
+                font-weight: 600;
+                text-transform: uppercase;
+                font-size: 13px;
+                text-align: center;
+                padding: 12px;
+            }
+            .summary-table td.pass { color: #27ae60; font-weight: bold; }
+            .summary-table td.fail { color: #e74c3c; font-weight: bold; }
+            .summary-table td.error { color: #f39c12; font-weight: bold; }
+            .summary-table td.skipped { color: #8e44ad; font-weight: bold; }
+            .summary-table td.incomplete { color: #95a5a6; font-weight: bold; }
+            .summary-table td.newrequirement { color: #3498db; font-weight: bold; }
+            .summary-table td.datasynchronization { color: #e74c3c; font-weight: bold; }
+            .summary-table td.defect { color: #e74c3c; font-weight: bold; }
+            .status-cell.pass { background-color: #27ae60; color: white; }
+            .status-cell.fail { background-color: #e74c3c; color: white; }
+            .status-cell.error { background-color: #f39c12; color: white; }
+            .status-cell.skipped { background-color: #8e44ad; color: white; }
+            .status-cell.incomplete { background-color: #95a5a6; color: white; }
+            .status-cell.newrequirement { background-color: #3498db; color: white; }
+            .status-cell.datasynchronization { background-color: #e74c3c; color: white; }
+            .status-cell.defect { background-color: #e74c3c; color: white; }
+            a.test-link {
+                cursor: pointer;
+                color: #3498db;
+                text-decoration: none;
+                transition: color 0.2s;
+            }
+            a.test-link:hover {
+                color: #2980b9;
+                text-decoration: underline;
+            }
+            .filter-label {
+                font-weight: 600;
+                margin-right: 10px;
+                color: #2c3e50;
+                display: inline-block;
+                vertical-align: middle;
+                font-size: 14px;
+            }
+            .filter-container {
+                display: flex;
+                flex-direction: row;
+                flex-wrap: nowrap;
+                justify-content: flex-end;
+                align-items: center;
+                margin-bottom: 20px;
+                gap: 15px;
+            }
+            .select-wrapper {
+                position: relative;
+                display: inline-block;
+                width: 220px;
+            }
+            select {
+                appearance: none;
+                -webkit-appearance: none;
+                -moz-appearance: none;
+                width: 100%;
+                padding: 10px 30px 10px 12px;
+                font-size: 14px;
+                font-family: 'Inter', sans-serif;
+                color: #2c3e50;
+                background-color: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+                cursor: pointer;
+                transition: all 0.3s ease;
+                outline: none;
+            }
+            select:hover {
+                border-color: #3498db;
+                box-shadow: 0 0 8px rgba(52, 152, 219, 0.3);
+                transform: translateY(-1px);
+            }
+            select:focus {
+                border-color: #3498db;
+                box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.2);
+            }
+            select option {
+                background-color: #ffffff;
+                color: #2c3e50;
+                font-size: 14px;
+            }
+            .select-wrapper::after {
+                content: '▼';
+                position: absolute;
+                right: 12px;
+                top: 50%;
+                transform: translateY(-50%);
+                font-size: 12px;
+                color: #3498db;
+                pointer-events: none;
+                transition: transform 0.3s ease;
+            }
+            select:focus + .select-wrapper::after,
+            select:hover + .select-wrapper::after {
+                transform: translateY(-50%) rotate(180deg);
+            }
+            .summary-container {
+                display: flex;
+                flex-wrap: nowrap;
+                gap: 20px;
+                margin: 20px auto;
+                align-items: flex-start;
+            }
+            .execution-info-container {
+                display: flex;
+                flex-wrap: nowrap;
+                gap: 20px;
+                margin-bottom: 20px;
+            }
+            .summary-tables-container {
+                flex: 1;
+                min-width: 300px;
+                max-width: 590px;
+            }
+            .chart-container {
+                flex: 1;
+                min-width: 300px;
+                max-width: 400px;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }
+            .footer {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 5px;
+                color: #777;
+                font-size: 13px;
+                background-color: #ffffff;
+                border-top: 1px solid #d1d5db;
+                margin-top: 20px;
+            }
+            .footer img {
+                max-width: 100px;
+                height: auto;
+                object-fit: contain;
+            }
+            .footer-text {
+                flex-grow: 1;
+                text-align: center;
+            }
+            @media (max-width: 768px) {
+                .footer {
+                    flex-direction: column;
+                    align-items: center;
+                    gap: 10px;
+                }
+                .footer img {
+                    max-width: 80px;
+                }
+                .footer-text {
+                    order: 3;
+                    margin-top: 10px;
+                }
+            }
+            .testcase-table {
+                table-layout: fixed;
+            }
+            .testcase-table th:nth-child(1), .testcase-table td:nth-child(1) { width: 5%; }
+            .testcase-table th:nth-child(2), .testcase-table td:nth-child(2) { width: 15%; }
+            .testcase-table th:nth-child(3), .testcase-table td:nth-child(3) { width: 29%; }
+            .testcase-table th:nth-child(4), .testcase-table td:nth-child(4) { width: 35%; }
+            .testcase-table th:nth-child(5), .testcase-table td:nth-child(5) { width: 10%; }
+            .testcase-table th:nth-child(6), .testcase-table td:nth-child(6) { width: 15%; }
+            .testcase-table td {
+                font-size: 14px;
+                word-wrap: break-word;
+                overflow-wrap: break-word;
+                white-space: normal;
+                text-align: center;
+                padding: 12px;
+            }
+            .testcase-table td:nth-child(3) {
+                text-align: left;
+            }
+            .testcase-table td:nth-child(4) {
+                text-align: left;
+                line-height: 1.4;
+            }
+            .testcase-table tr:hover {
+                background-color: #f9f9f9;
+            }
+            .detailed-test-cases {
+                margin-top: 40px;
+            }
+            .legends-container {
+                display: inline-block;
+                position: relative;
+                margin-right: 10px;
+                vertical-align: middle;
+            }
+            .legends-icon {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 20px;
+                height: 20px;
+                background-color: #3498db;
+                color: white;
+                border-radius: 50%;
+                font-size: 12px;
+                font-weight: bold;
+                cursor: help;
+                text-decoration: none;
+                transition: background-color 0.3s;
+            }
+            .legends-icon:hover {
+                background-color: #2980b9;
+            }
+            .legends-tooltip {
+                visibility: hidden;
+                width: 400px;
+                background-color: #2c3e50;
+                color: #fff;
+                text-align: left;
+                border-radius: 6px;
+                padding: 15px;
+                position: absolute;
+                z-index: 100;
+                top: 25px;
+                left: 50%;
+                transform: translateX(-50%);
+                opacity: 0;
+                transition: opacity 0.3s;
+                box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+                font-size: 13px;
+                line-height: 1.5;
+            }
+            .legends-container:hover .legends-tooltip {
+                visibility: visible;
+                opacity: 1;
+            }
+            .legends-tooltip b {
+                color: #3498db;
+            }
+            .env-container {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 20px;
+                margin-top: 20px;
+            }
+            .env-column {
+                flex: 1;
+                min-width: 300px;
+            }
+            .env-table th, .env-table td {
+                padding: 12px;
+                border-bottom: 1px solid #eee;
+            }
+            @media (max-width: 768px) {
+                .testcase-table {
+                    display: block;
+                    overflow-x: auto;
+                    white-space: nowrap;
+                }
+                .testcase-table th, .testcase-table td {
+                    min-width: 100px;
+                }
+                .testcase-table td:nth-child(4) {
+                    min-width: 200px;
+                }
+                .summary-container, .execution-info-container {
+                    flex-direction: column;
+                    align-items: center;
+                }
+                .summary-tables-container, .chart-container {
+                    width: 100%;
+                    max-width: 100%;
+                }
+                .env-column {
+                    width: 100%;
+                }
+                .legends-tooltip {
+                    width: 90%;
+                    left: 50%;
+                    transform: translateX(-50%);
+                }
+                .filter-container {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 10px;
+                }
+                .select-wrapper {
+                    width: 100%;
+                }
+                select {
+                    width: 100%;
+                }
+            }
+        </style>
+    </head>
+    <body>
+    <div class='container'>
+    <h2>${executionType} Execution Report</h2>
+    """
+
+		// Add Execution Environment table with two columns
+		html << """
+    <h3>Execution Environment</h3>
+    <div class='env-container'>
+        <div class='env-column'>
+            <table class='env-table'>
+                <tr><th>Host Name</th><td>${encodeAsHTML(envProperties['hostName'])}</td></tr>
+                <tr><th>Local OS</th><td>${encodeAsHTML(envProperties['os'])}</td></tr>
+            </table>
+        </div>
+        <div class='env-column'>
+            <table class='env-table'>
+                <tr><th>Katalon Version</th><td>${encodeAsHTML(envProperties['katalonVersion'])}</td></tr>
+                <tr><th>Browser</th><td>${encodeAsHTML(envProperties['browser'])}</td></tr>
+            </table>
+        </div>
+    </div>
+    """
+
+		testSuite.'testsuite'.each { suite ->
+			String suiteName = suite.'@name' ?: "Unknown Suite"
+			suiteNames.add(suiteName)
+			suite.'testcase'.each { tc ->
+				totalTests++
+				String status
+				String testIdAttr = tc.'@name'?.'trim'() ?: "N/A"
+				String description = "No description provided"
+				def systemOutDescriptions = []
+
+				if (tc.'system-out' && tc.'system-out'?.'text'()?.'trim'()) {
+					String systemOut = tc.'system-out'.'text'().'trim'().'replaceAll'('\r\n', '\n')
+					// Extract [MESSAGE][INFO] - Captured comment texts
+					def commentMatcher = (systemOut =~ /\[MESSAGE\]\[INFO\]\s*-\s*Captured comment in\s*[:\-]?\s*([^\n]*?)(?=\n|$)/)
+					systemOutDescriptions = commentMatcher.findAll().collect {
+						String comment = it[1].'trim'()
+						logger.logInfo("Captured comment for ${testIdAttr}: '${comment}'")
+						comment
+					}
+					logger.logInfo("Total [MESSAGE][INFO] - Captured comments found for ${testIdAttr}: ${systemOutDescriptions.size()}")
+
+					// Use the first [MESSAGE][INFO] as the test case description
+					if (systemOutDescriptions) {
+						description = systemOutDescriptions[0]
+						logger.logInfo("Using first [MESSAGE][INFO] as description for ${testIdAttr}: ${description}")
+					}
+				} else {
+					logger.logInfo("No system-out data for ${testIdAttr}")
+				}
+
+				String startTime = "Not found"
+				String endTime = "Not found"
+				boolean hasDefect = false
+				boolean hasNewRequirement = false
+				boolean hasDataSynchronization = false
+
+				if (tc.'system-out' && tc.'system-out'?.'text'()?.'trim'()) {
+					String systemOut = tc.'system-out'.'text'().'trim'().'replaceAll'('\r\n', '\n')
+					def timestampMatcher = (systemOut =~ /\d{2}-\d{2}-\d{4}T\d{2}:\d{2}:\d{2}/)
+					def timestamps = timestampMatcher.findAll()
+					if (timestamps) {
+						startTime = timestamps[0].'replace'('T', ' ')
+						endTime = timestamps[-1].'replace'('T', ' ')
+					}
+
+					hasDefect = systemOut.contains('logDefect')
+					hasNewRequirement = systemOut.contains('logNewRequirement')
+					hasDataSynchronization = systemOut.contains('logDataSynchronization')
+				}
+
+				if (tc.'failure') {
+					status = "FAIL"
+					totalFailures++
+				} else if (tc.'error') {
+					status = "ERROR"
+					totalErrors++
+				} else if (tc.'skipped') {
+					status = "SKIPPED"
+					totalSkipped++
+				} else if (tc.'@status'?.'toLowerCase'() == 'incomplete') {
+					status = "INCOMPLETE"
+					totalIncomplete++
+				} else {
+					status = "PASS"
+					totalPassed++
+				}
+
+				if (hasDefect) {
+					if (status == "FAIL") {
+						totalFailures = Math.max(0, totalFailures - 1)
+					} else if (status == "ERROR") {
+						totalErrors = Math.max(0, totalErrors - 1)
+					} else if (status == "PASS") {
+						totalPassed = Math.max(0, totalPassed - 1)
+					}
+					status = "DEFECT"
+					totalDefect++
+				} else if (hasNewRequirement) {
+					if (status == "FAIL") {
+						totalFailures = Math.max(0, totalFailures - 1)
+					} else if (status == "ERROR") {
+						totalErrors = Math.max(0, totalErrors - 1)
+					} else if (status == "PASS") {
+						totalPassed = Math.max(0, totalPassed - 1)
+					}
+					status = "NEWREQUIREMENT"
+					totalNewRequirement++
+				} else if (hasDataSynchronization) {
+					if (status == "FAIL") {
+						totalFailures = Math.max(0, totalFailures - 1)
+					} else if (status == "ERROR") {
+						totalErrors = Math.max(0, totalErrors - 1)
+					} else if (status == "PASS") {
+						totalPassed = Math.max(0, totalPassed - 1)
+					}
+					status = "DATASYNCHRONIZATION"
+					totalDataSynchronization++
+				}
+
+				def cssClass = status.toLowerCase()
+				def displayStatus = status
+				if (status == "NEWREQUIREMENT") {
+					displayStatus = "NEW REQUIREMENT"
+				} else if (status == "DATASYNCHRONIZATION") {
+					displayStatus = "DATA SYNCHRONIZATION"
+				} else if (status == "DEFECT") {
+					displayStatus = "DEFECT"
+				} else {
+					displayStatus = status.capitalize()
+				}
+
+				def time = getValidTime(tc.'@time')
+				int minutes = (int)(time / 60)
+				double seconds = time % 60
+				String timeFormatted = "${minutes}m - ${seconds}s"
+
+				def testId = "test-${totalTests}"
+				testCasesHtml << """
+            <tr class='${cssClass}' data-suite='${encodeAsHTML(suiteName)}'>
+                <td>${totalTests}</td>
+                <td>${encodeAsHTML(suiteName)}</td>
+                <td><a class='test-link' onclick="openDetails('${testId}')">${encodeAsHTML(testIdAttr)}</a></td>
+                <td>${encodeAsHTML(description)}</td>
+                <td>${String.format('%.3f', time)}</td>
+                <td class='status-cell ${cssClass}'>${displayStatus}</td>
+            </tr>
+        """
+
+				def stepsHtml = new StringBuilder()
+				stepsHtml << """
+            <table style='width: 100%; border-collapse: collapse; margin-top: 20px; table-layout: fixed;'>
+                <tr style='background-color: #87ceeb;'>
+                    <th style='padding: 10px; border: 1px solid #ccc; width: 5%; vertical-align: top;'>#</th>
+                    <th style='padding: 10px; border: 1px solid #ccc; width: 80%; vertical-align: top;'>Description</th>
+                    <th style='padding: 10px; borderしかも: 1px solid #ccc; width: 15%; vertical-align: top;'>Status</th>
+                </tr>
+            """
+
+				def steps = []
+				if (tc.'system-out' && tc.'system-out'?.'text'()?.'trim'()) {
+					String systemOut = tc.'system-out'.'text'().'trim'().'replaceAll'('\r\n', '\n')
+					logger.logInfo("Processing system-out for test case ${testIdAttr} (suite: ${suiteName}, status: ${status}, length: ${systemOut.length()})")
+
+					// Extract listener steps
+					String loginFlowStatus = "PASSED"
+					String resetWindowStatus = "PASSED"
+					def listenerMatcher = (systemOut =~ /\[TEST_STEP\]\[(PASSED|FAILED|ERROR)\]\s*(?:[-:]\s*)?(Start listener action\s*:\s*(loginFLow|resetWindowForNextTest))(.*?)(?=\n\[|$)/)
+					listenerMatcher.each { match ->
+						String stepStatus = match[1].'trim'()
+						String stepDescription = match[2].'trim'()
+						if (stepDescription.contains("loginFLow")) {
+							loginFlowStatus = stepStatus
+							logger.logInfo("Found loginFLow listener step for ${testIdAttr}: Status=${loginFlowStatus}")
+						} else if (stepDescription.contains("resetWindowForNextTest")) {
+							resetWindowStatus = stepStatus
+							logger.logInfo("Found resetWindowForNextTest listener step for ${testIdAttr}: Status=${resetWindowStatus}")
+						}
+					}
+
+					// Add loginFLow listener step as the first step
+					steps << [
+						number: "${steps.size() + 1}",
+						description: "Start listener action: loginFLow",
+						status: loginFlowStatus
+					]
+
+					// Process test steps
+					def stepMatcher = (systemOut =~ /\[TEST_STEP\]\[(PASSED|FAILED|ERROR)\]\s*(?:[-:]\s*)?(.*?)(?=\n\[|$)/)
+					def failedMessage = ""
+					def screenshotHtml = ""
+					String screenshotPath = ""
+
+					boolean hasTestCaseError = status == "DATASYNCHRONIZATION" && systemOut.contains('[TEST_CASE][ERROR]')
+					if (hasTestCaseError) {
+						logger.logInfo("Found [TEST_CASE][ERROR] for ${testIdAttr} with DATASYNCHRONIZATION status")
+					} else if (status == "DATASYNCHRONIZATION") {
+						logger.logWarning("No [TEST_CASE][ERROR] found for ${testIdAttr} with DATASYNCHRONIZATION status")
+					}
+
+					if (status in [
+								"FAIL",
+								"ERROR",
+								"DEFECT",
+								"NEWREQUIREMENT",
+								"DATASYNCHRONIZATION"
+							]) {
+						def messageMatcher = (systemOut =~ /\[MESSAGE\]\[(FAILED|ERROR)\]\s*-\s*([\s\S]*?)(?=\n\[(TESTSTEP|MESSAGE|ATTACHMENT)\]|$)/)
+						def messages = []
+						messageMatcher.each { match ->
+							def messageContent = match[2].'trim'()
+							messageContent = messageContent.'split'('\n').findAll { line ->
+								!line.'contains'('[[ATTACHMENT|') &&
+										!line.'contains'('[TEST_STEP][FAILED]') &&
+										!line.'contains'('[TEST_STEP][PASSED]') &&
+										!line.'contains'('[MESSAGE][INFO]') &&
+										!line.'contains'('[MESSAGE][WARNING]') &&
+										!line.'contains'('[MESSAGE][PASSED]')
+							}.join('\n').trim()
+							if (messageContent) {
+								messages << messageContent
+							}
+						}
+
+						if (messages) {
+							failedMessage = messages.max { it.'length'() }
+							logger.logInfo("Selected longest [MESSAGE][FAILED] or [MESSAGE][ERROR] for ${testIdAttr} (status: ${status}): ${failedMessage}")
+						} else {
+							failedMessage = tc.'error'?.'text'()?.'trim'() ?: tc.'failure'?.'text'()?.'trim'() ?: "No error or failure message found"
+							logger.logWarning("No [MESSAGE][FAILED] or [MESSAGE][ERROR] found for ${testIdAttr}. Falling back to error/failure tag: ${failedMessage}")
+						}
+
+						def attachmentMatcher = (systemOut =~ /\[\[ATTACHMENT\|([^]]*?\.(png|jpg|jpeg))\]\]/)
+						if (attachmentMatcher.find()) {
+							screenshotPath = attachmentMatcher.group(1).trim()
+							logger.logInfo("Raw screenshot path for ${status.toLowerCase()} test case ${testIdAttr}: ${screenshotPath}")
+							File screenshotFile = null
+
+							if (screenshotPath.startsWith("C:\\") || screenshotPath.startsWith("/")) {
+								screenshotFile = new File(screenshotPath)
+							}
+
+							if (screenshotFile == null || !screenshotFile.exists()) {
+								String fileName = Paths.get(screenshotPath).getFileName().toString()
+								screenshotFile = new File(outputFolder, fileName)
+								if (!screenshotFile.exists()) {
+									def suiteFolders = latestTimestampFolder.listFiles()?.findAll { it.isDirectory() }
+									for (File suiteFolder : suiteFolders) {
+										File subTimestampFolder = suiteFolder.listFiles()?.findAll { it.isDirectory() }?.sort { -it.lastModified() }?.first()
+										if (subTimestampFolder) {
+											screenshotFile = new File(subTimestampFolder, fileName)
+											if (screenshotFile.exists()) {
+												break
+											}
+										}
+									}
+								}
+							}
+
+							if (screenshotFile != null && screenshotFile.exists()) {
+								String relativePath = Paths.get(outputFolder.absolutePath).relativize(Paths.get(screenshotFile.absolutePath)).toString().replaceAll('\\\\', '/')
+								screenshotHtml = "<br/><br/><img src='${relativePath}' alt='Screenshot' style='max-width: 100%; height: auto; border-radius: 4px;'>"
+								logger.logInfo("Found screenshot for ${status.toLowerCase()} test case ${testIdAttr}: ${screenshotFile.absolutePath}")
+							} else {
+								logger.logWarning("Screenshot file not found for ${status.toLowerCase()} test case ${testIdAttr}: ${screenshotPath}")
+								screenshotHtml = "<br/><br/><p style='color: #e74c3c;'>Screenshot not found: ${screenshotPath}</p>"
+							}
+						} else {
+							logger.logInfo("No screenshot attachment found in system-out for ${status.toLowerCase()} test case ${testIdAttr}")
+							screenshotHtml = "<br/><br/><p>No screenshot available.</p>"
+						}
+					}
+
+					int stepDescIndex = 1 // Start from second [MESSAGE][INFO] for steps
+					stepMatcher.eachWithIndex { match, index ->
+						String stepStatus = match[1].'trim'()
+						String stepDescription = match[2].'trim'()
+						if (stepDescription.startsWith('-')) {
+							stepDescription = stepDescription.substring(1).trim()
+						}
+						logger.logInfo("Matched step ${index + 1} for ${testIdAttr}: Status=${stepStatus}, Description=${stepDescription}")
+
+						if (stepStatus != "PASSED" && stepStatus != "FAILED" && stepStatus != "ERROR") {
+							logger.logWarning("Invalid step status found for test case ${testIdAttr}: ${stepStatus}")
+							return
+						}
+						if (stepDescription =~ /^\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s+(AM|PM)$/ || stepDescription.isEmpty()) {
+							logger.logWarning("Skipping invalid step description for test case ${testIdAttr}: ${stepDescription}")
+							return
+						}
+						if (stepDescription.contains('captureFailureScreenshot') ||
+								stepDescription.contains('takeScreenshot') ||
+								stepDescription.contains('Taking screenshot successfully') ||
+								stepDescription.contains('Start listener action: loginFLow') ||
+								stepDescription.contains('Start listener action: resetWindowForNextTest')) {
+							logger.logInfo("Skipping screenshot-related or listener step for ${testIdAttr}: ${stepDescription}")
+							return
+						}
+
+						if (!stepDescription.contains('com.qa.')) {
+							logger.logInfo("Skipping step description without com.qa. for test case ${testIdAttr}: ${stepDescription}")
+							return
+						}
+
+						// For PASSED steps, take only text before colon if present
+						if (stepStatus == "PASSED" && stepDescription.contains(':')) {
+							stepDescription = stepDescription.split(':')[0].trim()
+							logger.logInfo("Truncated PASSED step description for ${testIdAttr}: ${stepDescription}")
+						}
+
+						// Apply system-out description if available (starting from second [MESSAGE][INFO])
+						String systemOutDesc = stepDescIndex < systemOutDescriptions.'size'() ? systemOutDescriptions[stepDescIndex] : ""
+						if (systemOutDesc) {
+							logger.logInfo("Applying [MESSAGE][INFO] - Captured comment for step ${index + 1} of ${testIdAttr}: '${systemOutDesc}'")
+							stepDescription = "<span style='font-size: 16px; font-weight: bold; color: #2c3e50;'>${encodeAsHTML(systemOutDesc)}</span><br/>${encodeAsHTML(stepDescription)}"
+							stepDescIndex++
+						} else {
+							logger.logWarning("No [MESSAGE][INFO] - Captured comment found for step ${index + 1} of ${testIdAttr}, using: ${stepDescription}")
+							stepDescription = encodeAsHTML(stepDescription)
+						}
+
+						stepDescription = stepDescription ?: "Step ${index + 1} (No description provided)"
+						if ((stepStatus == "FAILED" || stepStatus == "ERROR") && status in [
+									"FAIL",
+									"ERROR",
+									"DEFECT",
+									"NEWREQUIREMENT",
+									"DATASYNCHRONIZATION"
+								]) {
+							stepDescription += "<br/><br/><b>Reason:</b><br/><pre style='background: #f4f6f8; padding: 10px; border-radius: 4px;'>" + encodeAsHTML(failedMessage) + "</pre>" + screenshotHtml
+						}
+						steps << [
+							number: "${steps.size() + 1}",
+							description: stepDescription,
+							status: stepStatus
+						]
+					}
+
+					// Add resetWindowForNextTest listener step as the last step
+					steps << [
+						number: "${steps.size() + 1}",
+						description: "Start listener action: resetWindowForNextTest",
+						status: resetWindowStatus
+					]
+
+					// Fallback parsing if no valid steps found (excluding listener steps)
+					if (steps.size() == 2 && steps[0].'description'.'contains'('loginFLow') && steps[1].'description'.'contains'('resetWindowForNextTest')) {
+						logger.logWarning("No valid test steps matched by primary regex for test case ${testIdAttr}. Attempting line-by-line parsing...")
+						systemOut.split('\n').eachWithIndex { line, lineIndex ->
+							def lineMatcher = (line =~ /\[TEST_STEP\]\[(PASSED|FAILED|ERROR)\]\s*(.*)/)
+							if (lineMatcher.find()) {
+								String stepStatus = lineMatcher.group(1).trim()
+								String stepDescription = lineMatcher.group(2).trim()
+								if (stepDescription.startsWith('-')) {
+									stepDescription = stepDescription.substring(1).trim()
+								}
+								logger.logInfo("Line-by-line matched step ${steps.size()} for ${testIdAttr}: Status=${stepStatus}, Description=${stepDescription}")
+
+								if (stepStatus != "PASSED" && stepStatus != "FAILED" && stepStatus != "ERROR") {
+									logger.logWarning("Invalid line-by-line step status for test case ${testIdAttr}: ${stepStatus}")
+									return
+								}
+								if (stepDescription =~ /^\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s+(AM|PM)$/ || stepDescription.isEmpty()) {
+									logger.logWarning("Skipping invalid line-by-line step description for test case ${testIdAttr}: ${stepDescription}")
+									return
+								}
+								if (stepDescription.contains('captureFailureScreenshot') ||
+										stepDescription.contains('takeScreenshot') ||
+										stepDescription.contains('Taking screenshot successfully') ||
+										stepDescription.contains('Start listener action: loginFLow') ||
+										stepDescription.contains('Start listener action: resetWindowForNextTest')) {
+									logger.logInfo("Skipping screenshot-related or listener line-by-line step for ${testIdAttr}: ${stepDescription}")
+									return
+								}
+
+								if (!stepDescription.contains('com.qa.')) {
+									logger.logInfo("Skipping line-by-line step description without com.qa. for test case ${testIdAttr}: ${stepDescription}")
+									return
+								}
+
+								// For PASSED steps, take only text before colon if present
+								if (stepStatus == "PASSED" && stepDescription.contains(':')) {
+									stepDescription = stepDescription.split(':')[0].trim()
+									logger.logInfo("Truncated PASSED line-by-line step description for ${testIdAttr}: ${stepDescription}")
+								}
+
+								// Apply system-out description if available (starting from second [MESSAGE][INFO])
+								String systemOutDesc = stepDescIndex < systemOutDescriptions.'size'() ? systemOutDescriptions[stepDescIndex] : ""
+								if (systemOutDesc) {
+									logger.logInfo("Applying [MESSAGE][INFO] - Captured comment for line-by-line step ${steps.size()} of ${testIdAttr}: '${systemOutDesc}'")
+									stepDescription = "<span style='font-size: 16px; font-weight: bold; color: #2c3e50;'>${encodeAsHTML(systemOutDesc)}</span><br/>${encodeAsHTML(stepDescription)}"
+									stepDescIndex++
+								} else {
+									logger.logWarning("No [MESSAGE][INFO] - Captured comment found for line-by-line step ${steps.size()} of ${testIdAttr}, using: ${stepDescription}")
+									stepDescription = encodeAsHTML(stepDescription)
+								}
+
+								stepDescription = stepDescription ?: "Step ${steps.size()} (No description provided)"
+								if ((stepStatus == "FAILED" || stepStatus == "ERROR") && status in [
+											"FAIL",
+											"ERROR",
+											"DEFECT",
+											"NEWREQUIREMENT",
+											"DATASYNCHRONIZATION"
+										]) {
+									stepDescription += "<br/><br/><b>Reason:</b><br/><pre style='background: #f4f6f8; padding: 10px; border-radius: 4px;'>" + encodeAsHTML(failedMessage) + "</pre>" + screenshotHtml
+								}
+								steps.add(steps.size() - 1, [
+									number: "${steps.size()}",
+									description: stepDescription,
+									status: stepStatus
+								])
+							}
+						}
+
+						steps.eachWithIndex { step, idx ->
+							step.'number' = "${idx + 1}"
+						}
+					}
+				} else {
+					logger.logWarning("No system-out found for test case ${testIdAttr} or system-out is empty")
+				}
+
+				if (steps.isEmpty()) {
+					String stepDescription = "No valid test steps found containing 'com.qa.' in JUnit XML. Check system-out format for test case: ${testIdAttr}"
+					if (status in [
+								"FAIL",
+								"ERROR",
+								"DEFECT",
+								"NEWREQUIREMENT",
+								"DATASYNCHRONIZATION"
+							]) {
+						String failedMessage = ""
+						String screenshotHtml = ""
+						String screenshotPath = ""
+						if (tc.'system-out' && tc.'system-out'?.'text'()?.'trim'()) {
+							String systemOut = tc.'system-out'.'text'().'trim'().'replaceAll'('\r\n', '\n')
+							def messageMatcher = (systemOut =~ /\[MESSAGE\]\[(FAILED|ERROR)\]\s*-\s*([\s\S]*?)(?=\n\[(TEST_STEP|MESSAGE|ATTACHMENT)\]|$)/)
+							def messages = []
+							messageMatcher.each { match ->
+								def messageContent = match[2].'trim'()
+								messageContent = messageContent.'split'('\n').findAll { line ->
+									!line.'contains'('[[ATTACHMENT|') &&
+											!line.'contains'('[TEST_STEP][FAILED]') &&
+											!line.'contains'('[TEST_STEP][PASSED]') &&
+											!line.'contains'('[MESSAGE][INFO]') &&
+											!line.'contains'('[MESSAGE][WARNING]') &&
+											!line.'contains'('[MESSAGE][PASSED]')
+								}.join('\n').trim()
+								if (messageContent) {
+									messages << messageContent
+								}
+							}
+
+							if (messages) {
+								failedMessage = messages.max { it.'length'() }
+								logger.logInfo("Selected longest [MESSAGE][FAILED] or [MESSAGE][ERROR] for fallback ${testIdAttr} (status: ${status}): ${failedMessage}")
+							} else {
+								failedMessage = tc.'error'?.'text'()?.'trim'() ?: tc.'failure'?.'text'()?.'trim'() ?: "No message found"
+								logger.logWarning("No [MESSAGE][FAILED] or [MESSAGE][ERROR] found for fallback ${testIdAttr}. Falling back to error/failure tag: ${failedMessage}")
+							}
+
+							def attachmentMatcher = (systemOut =~ /\[\[ATTACHMENT\|([^]]*?\.(png|jpg|jpeg))\]\]/)
+							if (attachmentMatcher.find()) {
+								screenshotPath = attachmentMatcher.group(1).trim()
+								File screenshotFile = null
+
+								if (screenshotPath.startsWith("C:\\") || screenshotPath.startsWith("/")) {
+									screenshotFile = new File(screenshotPath)
+								}
+
+								if (screenshotFile == null || !screenshotFile.exists()) {
+									String fileName = Paths.get(screenshotPath).getFileName().toString()
+									screenshotFile = new File(outputFolder, fileName)
+									if (!screenshotFile.exists()) {
+										def suiteFolders = latestTimestampFolder.listFiles()?.findAll { it.isDirectory() }
+										for (File suiteFolder : suiteFolders) {
+											File subTimestampFolder = suiteFolder.listFiles()?.findAll { it.isDirectory() }?.sort { -it.lastModified() }?.first()
+											if (subTimestampFolder) {
+												screenshotFile = new File(subTimestampFolder, fileName)
+												if (screenshotFile.exists()) {
+													break
+												}
+											}
+										}
+									}
+								}
+
+								if (screenshotFile != null && screenshotFile.exists()) {
+									String relativePath = Paths.get(outputFolder.absolutePath).relativize(Paths.get(screenshotFile.absolutePath)).toString().replaceAll('\\\\', '/')
+									screenshotHtml = "<br/><br/><img src='${relativePath}' alt='Screenshot' style='max-width: 100%; height: auto; border-radius: 4px;'>"
+								} else {
+									screenshotHtml = "<br/><br/><p style='color: #e74c3c;'>Screenshot not found: ${screenshotPath}</p>"
+								}
+							} else {
+								screenshotHtml = "<br/><br/><p>No screenshot available.</p>"
+							}
+						} else {
+							failedMessage = tc.'error'?.'text'()?.'trim'() ?: tc.'failure'?.'text'()?.'trim'() ?: "No message found"
+							screenshotHtml = status in [
+								"FAIL",
+								"ERROR",
+								"DEFECT",
+								"NEWREQUIREMENT",
+								"DATASYNCHRONIZATION"
+							] ? "<br/><br/><p>No screenshot available.</p>" : ""
+						}
+						stepDescription += "<br/><br/><b>Reason:</b><br/><pre style='background: #f4f6f8; padding: 10px; border-radius: 4px;'>" + encodeAsHTML(failedMessage) + "</pre>" + screenshotHtml
+					}
+					steps << [
+						number: "1",
+						description: stepDescription,
+						status: status
+					]
+					logger.logInfo("No valid steps parsed for test case ${testIdAttr}, using fallback row with message: ${stepDescription}")
+				}
+
+				steps.each { step ->
+					stepsHtml << """
+        <tr>
+            <td style='padding: 10px; border: 1px solid #ccc; vertical-align: top;'>${step.'number'}</td>
+            <td style='padding: 10px; border: 1px solid #ccc; vertical-align: top;'>${step.'description'}</td>
+            <td style='padding: 10px; border: 1px solid #ccc; vertical-align: top;'>${step.'status'}</td>
+        </tr>
+    """
+				}
+
+				stepsHtml << "</table>"
+
+				embeddedDetailsScript << """
+    detailData['${testId}'] = `
+    <html>
+    <head>
+        <title>${encodeAsHTML(tc.'@name')}</title>
+        <style>
+            body { 
+                font-family: 'Inter', sans-serif; 
+                background: #f9f9f9; 
+                padding: 30px; 
+                color: #333; 
+                overflow-x: hidden; 
+            }
+            .container { 
+                max-width: 1200px; 
+                margin: auto; 
+                background: white; 
+                padding: 20px; 
+                border-radius: 8px; 
+                box-shadow: 0 4px 10px rgba(0,0,0,0.05); 
+                overflow: auto; 
+            }
+            h2 { 
+                color: #3498db; 
+            }
+            h3 { 
+                color: #2c3e50; 
+                margin-top: 20px; 
+            }
+            p { 
+                line-height: 1.6; 
+                word-wrap: break-word; 
+                overflow-wrap: break-word; 
+            }
+            .status { 
+                font-weight: bold; 
+                text-transform: uppercase; 
+                color: #${cssClass == 'pass' ? '27ae60' : cssClass == 'fail' ? 'e74c3c' : cssClass == 'error' ? 'f39c12' : cssClass == 'skipped' ? '8e44ad' : cssClass == 'incomplete' ? '95a5a6' : cssClass == 'newrequirement' ? '1abc9c' : cssClass == 'datasynchronization' ? 'd35400' : 'c0392b'}; 
+            }
+            img { 
+                max-width: 100%; 
+                height: auto; 
+                border-radius: 4px; 
+                margin-top: 10px; 
+                display: block; 
+            }
+            pre { 
+                white-space: pre-wrap; 
+                word-wrap: break-word; 
+                overflow-wrap: break-word; 
+            }
+            table { 
+                width: 100%; 
+                border-collapse: collapse; 
+                max-width: 100%; 
+                box-sizing: border-box; 
+                table-layout: fixed; 
+            }
+            th, td { 
+                padding: 10px; 
+                border: 1px solid #ccc; 
+                text-align: left; 
+                box-sizing: border-box; 
+                vertical-align: top; 
+            }
+            th:nth-child(1), td:nth-child(1) { width: 5%; }
+            th:nth-child(2), td:nth-child(2) { width: 80%; }
+            th:nth-child(3), td:nth-child(3) { width: 15%; }
+            @media (max-width: 1280px) {
+                .container { 
+                    max-width: 90%; 
+                    padding: 15px; 
+                }
+                body { 
+                    padding: 20px; 
+                }
+            }
+            @media (max-width: 768px) {
+                .container { 
+                    max-width: 100%; 
+                    padding: 10px; 
+                }
+                body { 
+                    padding: 10px; 
+                }
+                th, td { 
+                    padding: 8px; 
+                    font-size: 14px; 
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class='container'>
+            <h2>${encodeAsHTML(tc.'@name')}</h2>
+            <h3>Information</h3>
+            <p><b>Suite:</b> ${encodeAsHTML(suiteName)}</p>
+            <p><b>ID:</b> ${encodeAsHTML(testIdAttr)}</p>
+            <p><b>Description:</b> ${encodeAsHTML(description)}</p>
+            <p><b>Start:</b> ${startTime}</p>
+            <p><b>End:</b> ${endTime}</p>
+            <p><b>Elapsed:</b> ${timeFormatted}</p>
+            <p><b>Status:</b> <span class='status'>${displayStatus}</span></p>
+            <hr/>
+            <h3>Test Steps</h3>
+            ${stepsHtml.toString()}
+        </div>
+    </body>
+    </html>
+    `;
+    """
+			}
+		}
+
+		double successRate = totalTests > 0 ? (totalPassed / totalTests) * 100 : 0
+		// Debug: Log totalTimeInSeconds to verify input value
+		logger.logInfo("Total time in seconds before conversion: ${totalTimeInSeconds}")
+		double minutes = Math.floor(totalTimeInSeconds / 60.0);
+		double seconds = (totalTimeInSeconds / 60.0 - minutes) * 60.0;
+
+		def suiteFilterOptions = new StringBuilder()
+		suiteFilterOptions << "<option value='ALL'>Show All</option>"
+		suiteNames.sort().each { suiteName ->
+			suiteFilterOptions << "<option value='${encodeAsHTML(suiteName)}'>${encodeAsHTML(suiteName)}</option>"
+		}
+
+		// Construct paths to logo images using getProjectDir()
+		String logoEquiTrustPath = Paths.get(getProjectDir(), "LogoImage", "logo-equitrust.png").toString().replaceAll('\\\\', '/')
+		String logoQapitolPath = Paths.get(getProjectDir(), "LogoImage", "logo-qapitolqa.png").toString().replaceAll('\\\\', '/')
+
+		html << """
+    <h3>Test Execution Summary</h3>
+    <div style='display: flex; justify-content: flex-end; margin-bottom: 10px;'>
+        <span class='legends-container'>
+            <div class='legends-tooltip'>
+                <p><b>Test Suite Name</b> – The names of the test suites that group related test cases together.</p>
+                <p><b>Total Tests</b> – Total number of test cases executed in the test suite or test suites.</p>
+                <p><b>Passed</b> – Number of test cases that executed successfully without any errors or failures.</p>
+                <p><b>New Requirement</b> – Test cases that have been modified or deprecated due to updated business requirements. These are no longer valid for daily regression execution as per EquiTrust's latest direction and are excluded from standard pass/fail evaluation.</p>
+                <p><b>Failed</b> – Number of test cases that failed due to functional or validation issues during execution.</p>
+                <p><b>Data Synchronization</b> – Test cases that fail due to incomplete or outdated data copied to the QA environment. These often result in error pages and are environmental, not functional, issues.</p>
+                <p><b>Defect</b> – Number of test cases that failed due to known application bugs or issues tracked as defects.</p>
+                <p><b>Script Errors</b> – Number of test cases that failed due to problems in the test script itself (e.g., syntax errors, exceptions not related to the application under test).</p>
+                <p><b>Skipped</b> – Number of test cases that were not executed, usually due to unmet preconditions or being intentionally ignored.</p>
+                <p><b>Incomplete</b> – Number of test cases that started execution but did not complete due to interruptions, crashes, or abrupt termination.</p>
+                <p><b>Test Suite Name</b> – The identifier or name assigned to the test suite executed.</p>
+                <p><b>Start Time Execution</b> – The timestamp when the test execution started.</p>
+                <p><b>End Time Execution</b> – The timestamp when the test execution finished.</p>
+                <p><b>Total Execution Time</b> – Total time taken to execute all test cases from start to finish, including setup and teardown.</p>
+            </div>
+            <span style='margin-left: 5px; font-size: 14px; font-weight: bold;'>Legend</span>
+        </span>
+    </div>
+    <div class='execution-info-container'>
+        <div class='env-column'>
+            <table class='env-table'>
+                <tr><th>Test Suite Name</th><td>${encodeAsHTML(testsuitesName)}</td></tr>
+                <tr><th>Start Time Execution</th><td>${encodeAsHTML(startTimeExecution)}</td></tr>
+            </table>
+        </div>
+        <div class='env-column'>
+            <table class='env-table'>
+                <tr><th>Total Execution Time</th><td>${String.format("%.0f", minutes)}m - ${String.format("%.3f", seconds)}s</td></tr>
+                <tr><th>End Time Execution</th><td>${encodeAsHTML(endTimeExecution)}</td></tr>
+            </table>
+        </div>
+    </div>
+    <div class='summary-container'>
+        <div class='summary-tables-container'>
+            <table class='summary-table'>
+                <tr><th>Total Tests</th><td>${totalTests}</td></tr>
+                <tr><th>Passed</th><td class='pass'>${totalPassed}</td></tr>
+                <tr><th>New Requirement</th><td class='newrequirement'>${totalNewRequirement}</td></tr>
+                <tr><th>Failed</th><td class='fail'>${totalFailures}</td></tr>
+                <tr><th>Data Synchronization</th><td class='datasynchronization'>${totalDataSynchronization}</td></tr>
+                <tr><th>Defect</th><td class='defect'>${totalDefect}</td></tr>
+                <tr><th>Script Errors</th><td class='error'>${totalErrors}</td></tr>
+                <tr><th>Skipped</th><td class='skipped'>${totalSkipped}</td></tr>
+                <tr><th>Incomplete</th><td class='incomplete'>${totalIncomplete}</td></tr>
+            </table>
+        </div>
+        <div class='chart-container' style="padding-top:42px;padding-left:80px;">
+            <canvas id='resultChart'></canvas>
+        </div>
+    </div>
+
+    <div class='detailed-test-cases'>
+        <h3>Detailed Test Cases</h3>
+    </div>
+    <div class='filter-container'>
+        ${isSingleSuite ? '' : """
+		<label class='filter-label' for='suiteFilter'>Filter Suite By:</label>
+		<div class='select-wrapper'>
+			<select id='suiteFilter'>
+				${suiteFilterOptions.toString()}
+			</select>
+		</div>
+		"""
+			}
+        <label class='filter-label' for='statusFilter'>Filter Status By:</label>
+        <div class='select-wrapper'>
+            <select id='statusFilter'>
+                <option value='ALL'>Show All</option>
+                <option value='pass'>Passed</option>
+                <option value='fail'>Failed</option>
+                <option value='error'>Errors</option>
+                <option value='skipped'>Skipped</option>
+                <option value='incomplete'>Incomplete</option>
+                <option value='newrequirement'>New Requirement</option>
+                <option value='datasynchronization'>Data Synchronization</option>
+                <option value='defect'>Defect</option>
+            </select>
+        </div>
+    </div>
+
+    <table class='testcase-table' id='testcaseTable'>
+        <tr>
+            <th>S.No</th>
+            <th>Suite Name</th>
+            <th>ID</th>
+            <th>Description</th>
+            <th>Time (sec)</th>
+            <th>Status</th>
+        </tr>
+        ${
+				testCasesHtml.toString()
+			}
+    </table>
+
+    <div class='footer'>
+        <img src='${
+				logoEquiTrustPath
+			}' alt='EquiTrust Logo' onerror="this.src='';this.alt='EquiTrust Logo Not Found';">
+        <div class='footer-text'>Agent Portal Customized Automation Execution Report</div>
+        <img src='${
+				logoQapitolPath
+			}' alt='Qapitol QA Logo' onerror="this.src='';this.alt='Qapitol QA Logo Not Found';">
+    </div>
+
+    <script src='https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'></script>
+    <script src='https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js'></script>
+    <script>
+        Chart.register(ChartDataLabels);
+
+        const ctx = document.getElementById('resultChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'pie',
+            data: {
+                labels: ['Passed', 'New Requirement', 'Failed', 'Data Synchronization', 'Defect', 'Script Errors', 'Skipped', 'Incomplete'],
+                datasets: [{
+                    data: [${
+				totalPassed
+			}, ${
+				totalNewRequirement
+			}, ${
+				totalFailures
+			}, ${
+				totalDataSynchronization
+			}, ${
+				totalDefect
+			}, ${
+				totalErrors
+			}, ${
+				totalSkipped
+			}, ${
+				totalIncomplete
+			}],
+                    backgroundColor: ['#27ae60', '#3498db', '#e74c3c', '#e74c3c', '#e74c3c', '#f39c12', '#8e44ad', '#95a5a6'],
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: { font: { size: 14 } }
+                    },
+                    datalabels: {
+                        formatter: (value, context) => {
+                            const total = context.dataset.data.reduce((sum, val) => sum + val, 0);
+                            const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                            return percentage + '%';
+                        },
+                        color: '#fff',
+                        font: {
+                            weight: 'bold',
+                            size: 12
+                        },
+                        textAlign: 'center',
+                        display: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return value > 0;
+                        }
+                    }
+                }
+            }
+        });
+
+        function applyFilters() {
+            const suiteFilter = ${
+				isSingleSuite ? "'ALL'" : "document.getElementById('suiteFilter') ? document.getElementById('suiteFilter').value : 'ALL'"
+			};
+            const statusFilter = document.getElementById('statusFilter').value.toLowerCase();
+            const rows = document.querySelectorAll('#testcaseTable tr');
+            rows.forEach((row, index) => {
+                if (index === 0) return;
+                const suiteMatch = suiteFilter === 'ALL' || row.getAttribute('data-suite') === suiteFilter;
+                const statusMatch = statusFilter === 'all' || row.classList.contains(statusFilter);
+                row.style.display = suiteMatch && statusMatch ? 'table-row' : 'none';
+            });
+        }
+
+        ${
+				isSingleSuite ? '' : "document.getElementById('suiteFilter').addEventListener('change', applyFilters);"
+			}
+        document.getElementById('statusFilter').addEventListener('change', applyFilters);
+
+        const detailData = {};
+        ${
+				embeddedDetailsScript.toString()
+			}
+
+        function openDetails(id) {
+            const win = window.open('', '_blank');
+            win.document.write(detailData[id]);
+            win.document.close();
+        }
+    </script>
+    </body>
+    </html>
+    """
+
+		def timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date())
+		def outFileName = "${executionType}_Execution_Report_${timestamp}.html"
+		def outFile = new File(outputFolder, outFileName)
+		outFile.write(html.toString())
+
+		logger.logInfo("✅ HTML Report generated at: ${outFile.absolutePath}")
+	}
+
+	static double getValidTime(String timeStr) {
+		try {
+			return timeStr?.toDouble() ?: 0.0
+		} catch (Exception e) {
+			return 0.0
+		}
+	}
+
+	static String encodeAsHTML(String input) {
+		if (input == null) return ""
+		return input.replaceAll('&', '&amp;')
+				.replaceAll('<', '&lt;')
+				.replaceAll('>', '&gt;')
+				.replaceAll('"', '&quot;')
+				.replaceAll('\'', '&apos;')
+	}
+}
