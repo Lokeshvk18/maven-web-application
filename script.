@@ -1,3 +1,5 @@
+import static com.kms.katalon.core.configuration.RunConfiguration.getProjectDir
+
 import com.kms.katalon.core.logging.KeywordLogger
 import groovy.xml.XmlParser
 import java.nio.file.*
@@ -19,28 +21,15 @@ public class ParallelJUnitReportToHTML {
 		}
 		logger.logInfo("✅ KeywordLogger initialized successfully")
 
-		// Step 0: Base path (shared location before the build-* folder)
-		String basePath = "D:/bamboo/agent-home/artifact/AGK-AKNP/shared"
-		File sharedDir = new File(basePath)
-
-		// Step 1: Find latest build-xxx folder
-		File buildDir = sharedDir.listFiles()?.findAll { it.isDirectory() && it.name.startsWith("build-") }?.sort { -it.lastModified() }?.first()
-		if (!buildDir) {
-			logger.logWarning("❌ No build-* directory found in: ${basePath}")
-			return
-		}
-
-		// Step 2: Resolve Reports path
-		String reportsPath = Paths.get(buildDir.absolutePath, "Katalon-Report", "Reports").toString()
+		// Step 1: Locate the Reports folder
+		String reportsPath = Paths.get(getProjectDir(), "Reports").toString()
 		File reportsDir = new File(reportsPath)
 		if (!reportsDir.exists() || !reportsDir.isDirectory()) {
 			logger.logWarning("❌ Reports folder not found at: ${reportsPath}")
 			return
 		}
 
-		logger.logInfo("✅ Resolved Reports path: ${reportsPath}")
-
-		// Step 3: Find the latest timestamped folder
+		// Step 2: Find the latest timestamped folder
 		File latestTimestampFolder = reportsDir.listFiles()?.findAll { it.isDirectory() }?.sort { -it.lastModified() }?.first()
 		if (!latestTimestampFolder) {
 			logger.logWarning("❌ No timestamped folder found in Reports directory: ${reportsPath}")
@@ -48,7 +37,7 @@ public class ParallelJUnitReportToHTML {
 		}
 		logger.logInfo("Latest timestamp folder: ${latestTimestampFolder.absolutePath}")
 
-		// Step 4: Find the single subfolder with any name
+		// Step 3: Find the single subfolder with any name
 		File[] subFolders = latestTimestampFolder.listFiles()?.findAll { it.isDirectory() }
 		if (!subFolders || subFolders.length != 1) {
 			logger.logWarning("❌ Expected exactly one subfolder in timestamp folder: ${latestTimestampFolder.absolutePath}, found ${subFolders?.length ?: 0}")
@@ -60,7 +49,7 @@ public class ParallelJUnitReportToHTML {
 		String executionSource = RunConfiguration.getExecutionSource()
 		println "Execution Source: ${executionSource}"
 
-		// Step 5: Determine execution type based on subfolder count and names
+		// Step 4: Determine execution type based on subfolder count and names
 		File[] executionSubFolders = executionFolder.listFiles()?.findAll { it.isDirectory() }
 		if (!executionSubFolders) {
 			logger.logWarning("❌ No subfolders found in execution folder: ${executionFolder.absolutePath}")
@@ -92,7 +81,7 @@ public class ParallelJUnitReportToHTML {
 
 		logger.logInfo("Execution type: ${executionType}, Target folder: ${targetFolder.absolutePath}")
 
-		// Step 6: Navigate to the timestamped subfolder within the target folder
+		// Step 5: Navigate to the timestamped subfolder within the target folder
 		File timestampSubFolder = targetFolder.listFiles()?.findAll { it.isDirectory() }?.sort { -it.lastModified() }?.first()
 		if (!timestampSubFolder) {
 			logger.logWarning("❌ No timestamped subfolder found in target folder: ${targetFolder.absolutePath}")
@@ -109,7 +98,7 @@ public class ParallelJUnitReportToHTML {
 
 		logger.logInfo("Processing ${executionType} execution JUnit report at: ${junitFile.absolutePath}")
 
-		// Step 7: Parse JUnit XML and generate HTML
+		// Step 6: Parse JUnit XML and generate HTML
 		def parser = new XmlParser()
 		def testSuite = parser.parse(junitFile)
 
@@ -723,7 +712,7 @@ public class ParallelJUnitReportToHTML {
                 <tr style='background-color: #87ceeb;'>
                     <th style='padding: 10px; border: 1px solid #ccc; width: 5%; vertical-align: top;'>#</th>
                     <th style='padding: 10px; border: 1px solid #ccc; width: 80%; vertical-align: top;'>Description</th>
-                    <th style='padding: 10px; borderしかも: 1px solid #ccc; width: 15%; vertical-align: top;'>Status</th>
+                    <th style='padding: 10px; border: 1px solid #ccc; width: 15%; vertical-align: top;'>Status</th>
                 </tr>
             """
 
@@ -1430,28 +1419,28 @@ public class ParallelJUnitReportToHTML {
     </html>
     """
 
-		def timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date())
-		def outFileName = "${executionType}_Execution_Report_${timestamp}.html"
-		def outFile = new File(outputFolder, outFileName)
-		outFile.write(html.toString())
+	def timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date())
+	def outFileName = "${executionType}_Execution_Report_${timestamp}.html"
+	def outFile = new File(outputFolder, outFileName)
+	outFile.write(html.toString())
 
-		logger.logInfo("✅ HTML Report generated at: ${outFile.absolutePath}")
-	}
+	logger.logInfo("✅ HTML Report generated at: ${outFile.absolutePath}")
+}
 
-	static double getValidTime(String timeStr) {
-		try {
-			return timeStr?.toDouble() ?: 0.0
-		} catch (Exception e) {
-			return 0.0
-		}
+static double getValidTime(String timeStr) {
+	try {
+		return timeStr?.toDouble() ?: 0.0
+	} catch (Exception e) {
+		return 0.0
 	}
+}
 
-	static String encodeAsHTML(String input) {
-		if (input == null) return ""
-		return input.replaceAll('&', '&amp;')
-				.replaceAll('<', '&lt;')
-				.replaceAll('>', '&gt;')
-				.replaceAll('"', '&quot;')
-				.replaceAll('\'', '&apos;')
-	}
+static String encodeAsHTML(String input) {
+	if (input == null) return ""
+	return input.replaceAll('&', '&amp;')
+			.replaceAll('<', '&lt;')
+			.replaceAll('>', '&gt;')
+			.replaceAll('"', '&quot;')
+			.replaceAll('\'', '&apos;')
+}
 }
